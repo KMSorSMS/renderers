@@ -70,6 +70,7 @@ tag-pattern = '^renderers-v(?P<version>.+)$'
 fallback-version = "0.0.0"
 
 [tool.hatch.version.raw-options]
+dist_name = "renderers"
 # Only stable ``renderers-v<MAJOR>.<MINOR>.<PATCH>`` tags participate in
 # version resolution; legacy per-commit ``.devN`` tags are excluded.
 # Untagged commits get a clean PEP 440 dev version derived from distance

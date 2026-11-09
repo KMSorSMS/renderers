@@ -96,6 +96,74 @@ next_prompt_ids = r.bridge_to_next_turn(
 
 Hand-coded renderers ship for `qwen3`, `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `glm-5`, `glm-5.1`, `glm-5.3`, `glm-5.3-flash`, `glm-4.5`, `minimax-m2`, `deepseek-v3`, `deepseek-r1`, `deepseek-v4` (V4 Flash 0731), `kimi-k2`, `kimi-k2.5` / `kimi-k2.6`, `laguna-xs.2`, `laguna-xs-2.1`, `laguna-s-2.1`, `laguna-m.1`, `nemotron-3`, `nemotron-3-ultra`, `nemotron-3.5`, `llama-3`, `gpt-oss`, `muse-glimmer`, `hy3`, `inkling` / `inkling-small`, and `prime-qwen3`. Anything else falls back to `DefaultRenderer`, a generic `apply_chat_template` wrapper. `qwen3-vl`, `qwen3.5`, `qwen3.6`, `qwen3.8`, `gemma4`, `glm-5.3-flash`, `muse-glimmer`, `kimi-k2.5` / `kimi-k2.6`, and the Inkling checkpoints are multimodal (Inkling handles both image **and** audio; `glm-5.3-flash` and `muse-glimmer` render images only with `process_multimodal=False`).
 
+## Native inference clients
+
+`renderers.client.generate` supports `backend="vllm"` (the existing default) and
+`backend="sglang"`. Both reuse the same renderer, exact sampled-token history,
+response parser, and returned token/logprob contract. The SGLang backend calls
+`/generate` directly; installing the SGLang runtime in an environment worker is
+not required.
+
+```python
+from openai import AsyncOpenAI
+from renderers.client import generate
+
+async with AsyncOpenAI(base_url="http://sglang-router:30000/v1", api_key="EMPTY") as client:
+    result = await generate(
+        client=client,
+        renderer=r,
+        model="Qwen/Qwen3-8B",
+        messages=[{"role": "user", "content": "hi"}],
+        backend="sglang",
+        sampling_params={"max_tokens": 256, "temperature": 0.8, "seed": 42},
+        backend_options={
+            "max_context_len": 8192,
+            "max_response_tokens": 1024,
+            "abort_strategy": "workers",
+        },
+        extra_headers={"x-session-id": "episode-attempt"},
+    )
+```
+
+`backend_options` is validated by `renderers.backends.SGLangOptions`. It supports
+optional `lora_path`, launch-time stop/length limits, session-routing headers,
+compact top-logprob transfer, sampling masks, expert routing, and indexer replay.
+Full-weight training omits `lora_path`. Requesting a replay buffer requires its
+explicit `(layers, top_k)` shape because SGLang sends headerless int32 bytes.
+Returned arrays retain their token offset, and completion/prefill weight-version
+spans retain their original completion/prompt coordinates. `sampling_constraints`
+pins the training distribution against harness overrides; `min_top_logprobs`
+requires sufficient evidence for top-logprob training. Unsupported sampling parameters and
+missing requested evidence raise errors instead of being silently discarded.
+Compact output transfer requires an engine with output top-logprob encoding;
+older engines can return the ordinary arrays, which use the same validated parser.
+
+`max_prompt_len` in the options applies to the initial prompt only; pass
+`is_initial_turn=False` for subsequent turns. `max_context_len` and
+`max_response_tokens` apply to every request. Generation uses unique request IDs,
+disables implicit HTTP retries, and attempts a bounded, request-specific
+`/abort_request` on cancellation or transport timeout with the same routing
+headers. For a router, set `abort_strategy="workers"` to discover `/workers` and
+send the request ID to every engine worker; ordinary load balancing must not
+route an abort to a different worker. `abort_urls` can provide explicit engine
+addresses instead. Failed discovery, timeout, or worker abort raises
+`EngineAbortError`. Cancellation keeps the original generation request alive until
+its terminal reply arrives; an abort acknowledgement alone does not pass cleanup.
+A lost original HTTP connection also fails cleanup because GPU termination can
+no longer be established from that request.
+An explicit engine abort raises `EngineAbortedError`, never a successful stop.
+The owner must await cancelled tasks before closing its client.
+
+Multimodal SGLang calls require `process_multimodal=True` and original media in
+`messages`. The renderer's expanded tokens and processor sidecar remain available
+for training. Native media requests collapse only repeated placeholder ranges;
+the engine's expanded prompt must match the renderer outside media padding.
+Use identical model/processor settings on workers and engine. Renderers with
+heterogeneous placeholder spans need a model-specific encoder; a mismatch is
+rejected rather than training against a different prompt. CPU wire tests cover
+this contract; a real-engine multimodal test is still required for each deployed
+model/processor pair.
+
 ## API
 
 ```python
